@@ -1,0 +1,28 @@
+# Секреты
+.env
+.env.*
+!.env.example
+*.key
+keys.txt
+
+# Данные прогонов
+*.json
+!requirements.json
+tokens*.json
+ids*.json
+out/
+results/
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ОС
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
