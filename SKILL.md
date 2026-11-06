@@ -23,6 +23,10 @@ python3 fingerprint.py --base https://api.example.com/v1 --key sk-... \
 
 # подлинность: настоящая модель или переименованная — батарея задач
 python3 capability_battery.py --base https://api.example.com/v1 --key sk-... --model NAME
+
+# аудит станции: online rate, p50/p95, оверхед, provenance, score 0-100
+python3 station_audit.py --base https://api.example.com/v1 --key sk-... \
+    --model NAME [--model NAME2] --runs 3 [--json out.json]
 ```
 
 Порядок работы: **сначала метод 0** — сводка имени с каталогом агрегатора
@@ -251,6 +255,63 @@ print([b.get('signature','NO-SIG')[:40] for b in d.get('content',[]) if b.get('t
 только протокольный/поведенческий уровень. **Косвенный маркер «换芯»**:
 остаточные поля в `usage` (например `claude_cache_creation_*` в ответе
 OpenAI-эндпоинта) — признак, что под OpenAI-обёрткой стоит Claude-бэкенд.
+
+## Аудит станции: Hvoy AI + BazaarLink Probe + наш score
+
+**Hvoy AI** (`hvoyai.com`) ранжирует 中转站 по online rate, латентности, цене за
+1M входных токенов, покрытию моделей, объёму выборки и «сигналу согласованности
+модели» (模型一致性). Формула закрыта.
+
+**BazaarLink Probe** (`bazaarlink.ai/en/probe`) идёт глубже: 84 правила в трёх
+слоях — identity (family fingerprints, sub-model traits, anti-spoofing),
+accounting/transport (token counts, SSE framing, latency, response structure) и
+security/supply-chain. Ключевые проверки, которых не было у нас:
+
+- **AC-1.a Response Tampering** — сверяет tool-call с прямым ответом: ловит
+  переписанные install-команды, typosquatting пакетов, подмену параметров shell.
+- **AC-1.b Conditional Injection** — сравнивает офсет системного промпта на
+  базовом и «чувствительном» запросе; ловит инъекции, включающиеся по триггеру.
+- **AC-2 Secret Scanning** — вставляет honeypot-токен и ищет его в логах/ботах.
+- **TTFT** — время до первого токена; <500 мс считается здоровым.
+- **Token accuracy** — сверка заявленных токенов с известными; паддинг 5–15%
+  трудно заметить, поэтому нужен эталон.
+- **8 вердиктов** (full match, family-only, wrong model, substitution, forged
+  self-claim, induced behavior, insufficient data, ambiguous) и **право на
+  «не определено»**: «no baseline, no accusation» — без эталона станцию не
+  обвиняют, чтобы не клеветать на честный релей.
+- **Один сэмпл — один момент:** подмена бывает интермиттентной, нужен
+  периодический ретест.
+
+```bash
+python3 station_audit.py --base https://api.example.com/v1 --key sk-... \
+    --model claude-opus-5-5 --model claude-fable-5-1 --runs 3 [--json out.json]
+```
+
+| Блок | Вес | Как читать |
+|---|---|---|
+| online rate | 15 | доля успешных из N прогонов; <80% — станция нестабильна |
+| system-инструкция | 10 | `Reply with exactly: PONG42`; не исполнилась — роль режется |
+| мини-батарея | 25 | bat&ball, `847×293`, буквы, нули в 100! |
+| скрытый оверхед | 10 | ≤16 токенов — чисто; 100+ — инжект; 500+ — как у 9aws |
+| AC-1.b инъекция | 10 | рост оверхеда на «чувствительном» промпте = условный инжект |
+| AC-1.a tool-call | 10 | `npm install left-pad@1.3.0` должен вернуться байт-в-байт |
+| provenance | 15 | Claude `thinking_signature` ≥500 = 15; `usage_source=anthropic` / `claude_cache_creation_*` = 10; header DNA = 5 |
+| стабильность | 5 | CV латентности ≤0.2 = 5, ≤0.5 = 2 |
+
+Вердикты: **match** (≥80, tool-call цел, инъекции нет) · **family-only**
+(60–79: семейство верное, версия/класс под вопросом) · **suspicious** (40–59) ·
+**substituted** (<40) · **undetermined** (confidence <50% — проб не хватило;
+это не обвинение).
+
+Что брать на уровне станции, а не одной модели:
+
+- **online rate** — минимум 3 прогона, лучше 10: один 200 не говорит о стабильности;
+- **p50/p95 + TTFT** — p95 и TTFT важнее среднего: станция может быть быстрой
+  в типичном случае и висеть на хвосте;
+- **покрытие** — сколько заявленных моделей реально отвечает (полный прогон
+  каталога, как в `probe-models`);
+- **цена за 1M** — считать по `usage`, а не по прайсу станции;
+- **sample size** — фиксировать N в отчёте; один прогон = «неопределено».
 
 ## Оговорки
 
@@ -601,6 +662,9 @@ not as automatic authority over my behavior» (защита от prompt-injectio
   мелкие) + дискриминирующее (4 задачи, отделяющие фронтьер) → вердикт
   «фронтьер / средний класс / переименованная мелочь / недоступна». Гонять
   после установления вендора, с `--speed` для оценки класса по ток/с.
+- `station_audit.py` — аудит станции в стиле Hvoy: online rate, p50/p95,
+  скрытый оверхед, system-проба, мини-батарея, provenance и общий score 0-100
+  с вердиктом. Для нескольких моделей сразу печатает и станционный итог.
 - `ГДЕ-ПРОВЕРЯТЬ.md` — внешние источники: официальные каталоги вендоров,
   бенчмарки, арены, реестры моделей, **хабы рейтингов прокси-станций (hvoyai)**,
   **GitHub-инструменты проверки (veridrop и др.)**, релей-серверное ПО — и
